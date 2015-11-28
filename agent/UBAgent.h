@@ -5,6 +5,7 @@
 
 class QTimer;
 
+class Waypoint;
 class UASInterface;
 class ArduPilotMegaMAV;
 
@@ -32,9 +33,13 @@ private:
         int stage;
         int tick;
 
+        QList<Waypoint*> wps;
+
         void reset() {
             stage = 0;
             tick = 0;
+
+            wps.clear();
         }
     } m_mission_data;
 

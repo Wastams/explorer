@@ -1,5 +1,7 @@
 #include "UBAgent.h"
 
+#include <qmath.h>
+
 #include "config.h"
 #include "QsLog.h"
 
@@ -160,51 +162,80 @@ void UBAgent::missionTracker() {
 
 void UBAgent::stageBegin() {
     if (inPointZone(m_uav->getLatitude(), m_uav->getLongitude(), TAKEOFF_ALT)) {
-        m_mission_stage = STAGE_MISSION;
+        m_mission_data.wps = m_uav->getWaypointManager()->getWaypointEditableList();
 
-        QLOG_INFO() << "Mission Begin";
+        if ((m_mission_data.wps.count() > (m_uav->getUASID() + 1)) && (m_mission_data.wps[m_uav->getUASID()]->getAction() == MAV_CMD_NAV_WAYPOINT) && (m_mission_data.wps[m_uav->getUASID() + 1]->getAction() == MAV_CMD_NAV_WAYPOINT)) {
+            m_mission_stage = STAGE_MISSION;
+
+            QLOG_INFO() << "Mission Begin";
+
+            return;
+        }
+
+        m_mission_stage = STAGE_END;
+
+        QLOG_INFO() << "Mission Failed!";
     }
 }
 
 void UBAgent::stageEnd() {
-//    m_uav->setMode(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, ApmCopter::RTL);
-    m_uav->land();
+    m_uav->setMode(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, ApmCopter::RTL);
+//    m_uav->land();
 
     QLOG_INFO() << "Mission End";
 }
 
 void UBAgent::stageMission() {
     static double lat, lon;
+    static double step, step1, step2, coef;
+    static Vector3d v, v0, v1, v2, n, n0, n1, n2;
+
+    projections::MercatorProjection proj;
+
+    double dist = distance(m_uav->getLatitude(), m_uav->getLongitude(), 0, m_mission_data.wps[m_uav->getUASID() + 1]->getLatitude(), m_mission_data.wps[m_uav->getUASID() + 1]->getLongitude(), 0);
+
+    if (dist < VISUAL_RANGE) {
+        m_mission_stage = STAGE_END;
+
+        return;
+    }
 
     if (m_mission_data.stage == 0) {
         m_mission_data.stage++;
 
-//        double x, y, z;
+        core::Point pix0 = proj.FromLatLngToPixel(m_mission_data.wps[0]->getLatitude(), m_mission_data.wps[0]->getLongitude(), 15);
+        core::Point pix1 = proj.FromLatLngToPixel(m_mission_data.wps[m_uav->getUASID()]->getLatitude(), m_mission_data.wps[m_uav->getUASID()]->getLongitude(), 15);
+        core::Point pix2 = proj.FromLatLngToPixel(m_mission_data.wps[m_uav->getUASID() + 1]->getLatitude(), m_mission_data.wps[m_uav->getUASID() + 1]->getLongitude(), 15);
 
-        projections::MercatorProjection proj;
-//        proj.FromGeodeticToCartesian(m_uav->getLatitude(), m_uav->getLongitude(), m_uav->getAltitudeRelative(), x, y, z);
-//        proj.FromCartesianTGeodetic(x + 10, y, z, lat, lon);
+        v0 = Vector3d(pix0.X(), pix0.Y(), 0);
+        v1 = Vector3d(pix1.X(), pix1.Y(), 0);
+        v2 = Vector3d(pix2.X(), pix2.Y(), 0);
+
+        n0 = v1 - v0;
+        n1 = v2 - v1;
+        n2 = v2 - v0;
+
+        n0 = (1 / n0.length()) * n0;
+        n1 = (1 / n1.length()) * n1;
+        n2 = (1 / n2.length()) * n2;
+
         double res = proj.GetGroundResolution(15, m_uav->getLatitude());
-        core::Point pix = proj.FromLatLngToPixel(m_uav->getLatitude(), m_uav->getLongitude(), 15);
-        internals::PointLatLng pll = proj.FromPixelToLatLng(pix.X() + 10 / res, pix.Y(), 15);
+        step1 = (VISUAL_RANGE / res) / qSin(qAcos(Vector3d::dotProduct(n0, n1)));
+        step2 = (VISUAL_RANGE / res) / qSin(qAcos(Vector3d::dotProduct(n0, n2)));
+
+        v = v0;
+        n = n2;
+        step = step2;
+        coef = 1;
+
+        Vector3d pix = coef * step * n + v;
+        internals::PointLatLng pll = proj.FromPixelToLatLng(pix.x(), pix.y(), 15);
 
         lat = pll.Lat();
         lon = pll.Lng();
 
         Waypoint wp;
         wp.setFrame(MAV_FRAME_GLOBAL_RELATIVE_ALT);
-//        wp.setFrame(MAV_FRAME_GLOBAL_LOCAL_NED);
-//        wp.setAction(MAV_CMD_NAV_WAYPOINT);
-//        wp.setParam1(0);
-//        wp.setParam2(POINT_ZONE);
-//        wp.setParam3(POINT_ZONE);
-//        wp.setParam4(0);
-//        wp.setParam5(m_uav->getLatitude());
-//        wp.setParam6(m_uav->getLongitude());
-//        wp.setParam7(TAKEOFF_ALT);
-//        wp.setParam5(m_uav->getLocalX() + 10);
-//        wp.setParam6(m_uav->getLocalY());
-//        wp.setParam7(m_uav->getLocalZ());
         wp.setLatitude(lat);
         wp.setLongitude(lon);
         wp.setAltitude(m_uav->getAltitudeRelative());
@@ -214,19 +245,38 @@ void UBAgent::stageMission() {
         return;
     }
 
-    if (m_mission_data.stage == 1) {
-        if (inPointZone(lat, lon, m_uav->getAltitudeRelative())) {
-            m_mission_data.stage++;
-        }
+    if (inPointZone(lat, lon, m_uav->getAltitudeRelative())) {
+          m_mission_data.tick++;
 
-        return;
-    }
+          if (m_mission_data.tick % 2) {
+              if (v == v1) {
+                  v = v0;
+                  n = n2;
+                  step = step2;
+              } else {
+                  v = v1;
+                  n = n1;
+                  step = step1;
+              }
+          }
+          else {
+              coef += 2;
+          }
 
-    if (m_mission_data.tick > 20) {
-        m_mission_stage = STAGE_END;
-    } else {
-        m_mission_data.tick++;
+          Vector3d pix = coef * step * n + v;
+          internals::PointLatLng pll = proj.FromPixelToLatLng(pix.x(), pix.y(), 15);
 
-        m_net->sendData(2, QByteArray(1, MAV_CMD_NAV_TAKEOFF));
-    }
+          lat = pll.Lat();
+          lon = pll.Lng();
+
+          Waypoint wp;
+          wp.setFrame(MAV_FRAME_GLOBAL_RELATIVE_ALT);
+          wp.setLatitude(lat);
+          wp.setLongitude(lon);
+          wp.setAltitude(m_uav->getAltitudeRelative());
+
+          m_uav->getWaypointManager()->goToWaypoint(&wp);
+
+          return;
+      }
 }
