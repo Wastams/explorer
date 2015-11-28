@@ -183,7 +183,7 @@ void UBAgent::stageMission() {
 
         projections::MercatorProjection proj;
 //        proj.FromGeodeticToCartesian(m_uav->getLatitude(), m_uav->getLongitude(), m_uav->getAltitudeRelative(), x, y, z);
-//        proj.FromCartesianTGeodetic(x + 5, y, z, lat, lon);
+//        proj.FromCartesianTGeodetic(x + 10, y, z, lat, lon);
         double res = proj.GetGroundResolution(15, m_uav->getLatitude());
         core::Point pix = proj.FromLatLngToPixel(m_uav->getLatitude(), m_uav->getLongitude(), 15);
         internals::PointLatLng pll = proj.FromPixelToLatLng(pix.X() + 10 / res, pix.Y(), 15);
@@ -222,10 +222,10 @@ void UBAgent::stageMission() {
         return;
     }
 
-    if (m_mission_data.timer > 20) {
+    if (m_mission_data.tick > 20) {
         m_mission_stage = STAGE_END;
     } else {
-        m_mission_data.timer++;
+        m_mission_data.tick++;
 
         m_net->sendData(2, QByteArray(1, MAV_CMD_NAV_TAKEOFF));
     }
