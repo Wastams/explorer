@@ -85,7 +85,7 @@ void UBAgent::navModeChangedEvent(int uasID, int mode) {
         return;
 
     if (m_mission_stage == STAGE_MISSION)
-        QLOG_INFO() << "Mission Interrupted!";
+        QLOG_WARN() << "Mission Interrupted!";
 
     stopMission();
 }
@@ -174,7 +174,7 @@ void UBAgent::stageBegin() {
 
         m_mission_stage = STAGE_END;
 
-        QLOG_INFO() << "Mission Failed!";
+        QLOG_WARN() << "Mission Failed!";
     }
 }
 
@@ -258,8 +258,7 @@ void UBAgent::stageMission() {
                   n = n1;
                   step = step1;
               }
-          }
-          else {
+          } else {
               coef += 2;
           }
 
