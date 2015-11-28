@@ -219,9 +219,10 @@ void UBAgent::stageMission() {
         n1 = (1 / n1.length()) * n1;
         n2 = (1 / n2.length()) * n2;
 
+        double dist = sqrt(pow(VISUAL_RANGE, 2) - pow(m_uav->getAltitudeRelative(), 2));
         double res = proj.GetGroundResolution(15, m_uav->getLatitude());
-        step1 = (VISUAL_RANGE / res) / qSin(qAcos(Vector3d::dotProduct(n0, n1)));
-        step2 = (VISUAL_RANGE / res) / qSin(qAcos(Vector3d::dotProduct(n0, n2)));
+        step1 = (dist / res) / qSin(qAcos(Vector3d::dotProduct(n0, n1)));
+        step2 = (dist / res) / qSin(qAcos(Vector3d::dotProduct(n0, n2)));
 
         v = v0;
         n = n2;
