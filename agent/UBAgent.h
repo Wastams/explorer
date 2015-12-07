@@ -33,17 +33,19 @@ private:
         int stage;
         int tick;
 
+        int maxID;
+        int idx;
+
         QList<Waypoint*> wps;
 
         void reset() {
             stage = 0;
             tick = 0;
-
-            wps.clear();
         }
     } m_mission_data;
 
 private:
+    void stageIdle();
     void stageBegin();
     void stageMission();
     void stageEnd();
@@ -57,8 +59,7 @@ protected slots:
     void UASCreatedEvent(UASInterface *uav);
     void navModeChangedEvent(int uasID, int mode);
 
-    void startMission();
-    void stopMission();
+    void dataReadyEvent();
 
     void missionTracker();
 

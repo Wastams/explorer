@@ -1,7 +1,5 @@
 #include "UBAgent.h"
 
-#include <qmath.h>
-
 #include "config.h"
 #include "QsLog.h"
 
@@ -21,6 +19,7 @@ UBAgent::UBAgent(QObject *parent) : QObject(parent),
 {
     m_net = new UBNetwork(this);
     m_sensor = new UBVision(this);
+    connect(m_net, SIGNAL(dataReady()), this, SLOT(dataReadyEvent()));
 
     m_timer = new QTimer(this);
     m_timer->setInterval(MISSION_TRACK_RATE);
@@ -66,15 +65,39 @@ void UBAgent::UASCreatedEvent(UASInterface* uav) {
     m_net->startNetwork(m_uav->getUASID(), (PHY_PORT - MAV_PORT) + port);
     m_sensor->startSensor((SNR_PORT - MAV_PORT) + port);
 
-//    QTimer::singleShot(START_DELAY, this, SLOT(startMission()));
+//    QTimer::singleShot(START_DELAY, m_uav, SLOT(armSystem()));
+    m_mission_data.maxID = m_uav->getUASID();
+    m_timer->start();
 }
 
 void UBAgent::armedEvent() {
-    startMission();
+    m_mission_data.wps.clear();
+    m_mission_data.idx = m_uav->getUASID();
+    m_mission_data.wps = m_uav->getWaypointManager()->getWaypointEditableList();
+
+    if ((m_mission_data.wps.count() < (m_mission_data.idx + 2)) || (m_mission_data.wps[m_mission_data.idx]->getAction() != MAV_CMD_NAV_WAYPOINT) || (m_mission_data.wps[m_mission_data.idx + 1]->getAction() != MAV_CMD_NAV_WAYPOINT))
+        return;
+
+//    if (m_uav->getGroundSpeed() > 1)
+//        return;
+
+//    if (!inPointZone(m_uav->getLatitude(), m_uav->getLongitude(), 0))
+//        return;
+
+    if (m_uav->getSatelliteCount() < GPS_ACCURACY)
+        return;
+
+    if (m_uav->getCustomMode() != ApmCopter::GUIDED)
+        m_uav->setMode(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, ApmCopter::GUIDED);
+
+//    m_uav->executeCommand(MAV_CMD_MISSION_START, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+    m_uav->executeCommand(MAV_CMD_NAV_TAKEOFF, 1, 0, 0, 0, 0, 0, 0, TAKEOFF_ALT, 0);
+
+    m_mission_stage = STAGE_BEGIN;
 }
 
 void UBAgent::disarmedEvent() {
-    stopMission();
+    m_mission_stage = STAGE_IDLE;
 }
 
 void UBAgent::navModeChangedEvent(int uasID, int mode) {
@@ -84,10 +107,31 @@ void UBAgent::navModeChangedEvent(int uasID, int mode) {
     if (mode == ApmCopter::GUIDED)
         return;
 
-    if (m_mission_stage == STAGE_MISSION)
+    if (m_mission_stage != STAGE_IDLE) {
+        m_mission_stage = STAGE_IDLE;
         QLOG_WARN() << "Mission Interrupted!";
+    }
+}
 
-    stopMission();
+void UBAgent::dataReadyEvent() {
+    QByteArray data = m_net->getData();
+
+    if (!data.count())
+        return;
+
+    if (data.count() == 1) {
+        int id = data.data()[0];
+        if (m_mission_data.maxID < id)
+            m_mission_data.maxID = id;
+
+        return;
+    }
+
+//    if (m_uav->getCustomMode() != ApmCopter::GUIDED)
+//        m_uav->setMode(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, ApmCopter::GUIDED);
+
+//    if (!m_uav->isArmed())
+//        m_uav->armSystem();
 }
 
 double UBAgent::distance(double lat1, double lon1, double alt1, double lat2, double lon2, double alt2) {
@@ -111,34 +155,6 @@ bool UBAgent::inPointZone(double lat, double lon, double alt) {
     return false;
 }
 
-void UBAgent::startMission() {
-    if (m_uav->getSatelliteCount() < GPS_ACCURACY)
-        return;
-
-    if (!inPointZone(m_uav->getLatitude(), m_uav->getLongitude(), 0))
-        return;
-
-    if (m_uav->getCustomMode() != ApmCopter::GUIDED)
-        m_uav->setMode(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, ApmCopter::GUIDED);
-
-//    m_uav->executeCommand(MAV_CMD_MISSION_START, 1, 0, 0, 0, 0, 0, 0, 0, 0);
-
-    m_uav->executeCommand(MAV_CMD_NAV_TAKEOFF, 1, 0, 0, 0, 0, 0, 0, TAKEOFF_ALT, 0);
-    m_uav->getWaypointManager()->readWaypoints(true);
-
-    m_mission_data.reset();
-
-    m_mission_stage = STAGE_BEGIN;
-    m_timer->start();
-}
-
-void UBAgent::stopMission() {
-    m_mission_data.reset();
-
-    m_mission_stage = STAGE_IDLE;
-    m_timer->stop();
-}
-
 void UBAgent::missionTracker() {
 //    if (m_start_time < START_DELAY) {
 //        m_start_time++;
@@ -146,6 +162,9 @@ void UBAgent::missionTracker() {
 //    }
 
     switch (m_mission_stage) {
+    case STAGE_IDLE:
+        stageIdle();
+        break;
     case STAGE_BEGIN:
         stageBegin();
         break;
@@ -160,21 +179,17 @@ void UBAgent::missionTracker() {
     }
 }
 
+void UBAgent::stageIdle() {
+    m_uav->getWaypointManager()->readWaypoints(true);
+    m_net->sendData(BROADCAST_ADDRESS, QByteArray(1, m_uav->getUASID()));
+}
+
 void UBAgent::stageBegin() {
     if (inPointZone(m_uav->getLatitude(), m_uav->getLongitude(), TAKEOFF_ALT)) {
-        m_mission_data.wps = m_uav->getWaypointManager()->getWaypointEditableList();
+        m_mission_data.reset();
+        m_mission_stage = STAGE_MISSION;
 
-        if ((m_mission_data.wps.count() > (m_uav->getUASID() + 1)) && (m_mission_data.wps[m_uav->getUASID()]->getAction() == MAV_CMD_NAV_WAYPOINT) && (m_mission_data.wps[m_uav->getUASID() + 1]->getAction() == MAV_CMD_NAV_WAYPOINT)) {
-            m_mission_stage = STAGE_MISSION;
-
-            QLOG_INFO() << "Mission Begin";
-
-            return;
-        }
-
-        m_mission_stage = STAGE_END;
-
-        QLOG_WARN() << "Mission Failed!";
+        QLOG_INFO() << "Mission Begin";
     }
 }
 
@@ -182,6 +197,7 @@ void UBAgent::stageEnd() {
     m_uav->setMode(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, ApmCopter::RTL);
 //    m_uav->land();
 
+    m_mission_stage = STAGE_IDLE;
     QLOG_INFO() << "Mission End";
 }
 
@@ -192,24 +208,42 @@ void UBAgent::stageMission() {
 
     projections::MercatorProjection proj;
 
-    double dist = distance(m_uav->getLatitude(), m_uav->getLongitude(), 0, m_mission_data.wps[m_uav->getUASID() + 1]->getLatitude(), m_mission_data.wps[m_uav->getUASID() + 1]->getLongitude(), 0);
+    double dist = distance(m_uav->getLatitude(), m_uav->getLongitude(), 0, m_mission_data.wps[m_mission_data.idx + 1]->getLatitude(), m_mission_data.wps[m_mission_data.idx + 1]->getLongitude(), 0);
 
     if (dist < VISUAL_RANGE) {
-        m_mission_stage = STAGE_END;
+        m_mission_data.idx += m_mission_data.maxID;
 
-        return;
+        if ((m_mission_data.wps.count() < (m_mission_data.idx + 2)) || (m_mission_data.wps[m_mission_data.idx]->getAction() != MAV_CMD_NAV_WAYPOINT) || (m_mission_data.wps[m_mission_data.idx + 1]->getAction() != MAV_CMD_NAV_WAYPOINT)) {
+            m_mission_stage = STAGE_END;
+            return;
+        } else {
+            m_mission_data.reset();
+            QLOG_INFO() << "Search Zone Changed";
+        }
     }
 
     if (m_mission_data.stage == 0) {
         m_mission_data.stage++;
 
-        core::Point pix0 = proj.FromLatLngToPixel(m_mission_data.wps[0]->getLatitude(), m_mission_data.wps[0]->getLongitude(), 15);
-        core::Point pix1 = proj.FromLatLngToPixel(m_mission_data.wps[m_uav->getUASID()]->getLatitude(), m_mission_data.wps[m_uav->getUASID()]->getLongitude(), 15);
-        core::Point pix2 = proj.FromLatLngToPixel(m_mission_data.wps[m_uav->getUASID() + 1]->getLatitude(), m_mission_data.wps[m_uav->getUASID() + 1]->getLongitude(), 15);
+//        core::Point pix0 = proj.FromLatLngToPixel(m_mission_data.wps[0]->getLatitude(), m_mission_data.wps[0]->getLongitude(), GND_RES);
+//        core::Point pix1 = proj.FromLatLngToPixel(m_mission_data.wps[m_mission_data.idx]->getLatitude(), m_mission_data.wps[m_mission_data.idx]->getLongitude(), GND_RES);
+//        core::Point pix2 = proj.FromLatLngToPixel(m_mission_data.wps[m_mission_data.idx + 1]->getLatitude(), m_mission_data.wps[m_mission_data.idx + 1]->getLongitude(), GND_RES);
 
-        v0 = Vector3d(pix0.X(), pix0.Y(), 0);
-        v1 = Vector3d(pix1.X(), pix1.Y(), 0);
-        v2 = Vector3d(pix2.X(), pix2.Y(), 0);
+//        v0 = Vector3d(pix0.X(), pix0.Y(), 0);
+//        v1 = Vector3d(pix1.X(), pix1.Y(), 0);
+//        v2 = Vector3d(pix2.X(), pix2.Y(), 0);
+
+        double x0, y0, z0;
+        double x1, y1, z1;
+        double x2, y2, z2;
+
+        proj.FromGeodeticToCartesian(m_mission_data.wps[0]->getLatitude(), m_mission_data.wps[0]->getLongitude(), 0, x0, y0, z0);
+        proj.FromGeodeticToCartesian(m_mission_data.wps[m_mission_data.idx]->getLatitude(), m_mission_data.wps[m_mission_data.idx]->getLongitude(), 0, x1, y1, z1);
+        proj.FromGeodeticToCartesian(m_mission_data.wps[m_mission_data.idx + 1]->getLatitude(), m_mission_data.wps[m_mission_data.idx + 1]->getLongitude(), 0, x2, y2, z2);
+
+        v0 = Vector3d(x0, y0, z0);
+        v1 = Vector3d(x1, y1, z1);
+        v2 = Vector3d(x2, y2, z2);
 
         n0 = v1 - v0;
         n1 = v2 - v1;
@@ -219,10 +253,11 @@ void UBAgent::stageMission() {
         n1 = (1 / n1.length()) * n1;
         n2 = (1 / n2.length()) * n2;
 
-        double dist = sqrt(pow(VISUAL_RANGE, 2) - pow(m_uav->getAltitudeRelative(), 2));
-        double res = proj.GetGroundResolution(15, m_uav->getLatitude());
-        step1 = (dist / res) / qSin(qAcos(Vector3d::dotProduct(n0, n1)));
-        step2 = (dist / res) / qSin(qAcos(Vector3d::dotProduct(n0, n2)));
+        double dist = sqrt(pow(VISUAL_RANGE, 2) - pow(m_uav->getAltitudeRelative(), 2)) - 1;
+//        double res = proj.GetGroundResolution(GND_RES, m_uav->getLatitude());
+        double res = 1;
+        step1 = (dist / res) / sin(acos(Vector3d::dotProduct(n0, n1)));
+        step2 = (dist / res) / sin(acos(Vector3d::dotProduct(n0, n2)));
 
         v = v0;
         n = n2;
@@ -230,10 +265,12 @@ void UBAgent::stageMission() {
         coef = 1;
 
         Vector3d pix = coef * step * n + v;
-        internals::PointLatLng pll = proj.FromPixelToLatLng(pix.x(), pix.y(), 15);
 
-        lat = pll.Lat();
-        lon = pll.Lng();
+//        internals::PointLatLng pll = proj.FromPixelToLatLng(pix.x(), pix.y(), GND_RES);
+//        lat = pll.Lat();
+//        lon = pll.Lng();
+
+        proj.FromCartesianTGeodetic(pix.x(), pix.y(), pix.z(), lat, lon);
 
         Waypoint wp;
         wp.setFrame(MAV_FRAME_GLOBAL_RELATIVE_ALT);
@@ -264,10 +301,12 @@ void UBAgent::stageMission() {
           }
 
           Vector3d pix = coef * step * n + v;
-          internals::PointLatLng pll = proj.FromPixelToLatLng(pix.x(), pix.y(), 15);
 
-          lat = pll.Lat();
-          lon = pll.Lng();
+//          internals::PointLatLng pll = proj.FromPixelToLatLng(pix.x(), pix.y(), GND_RES);
+//          lat = pll.Lat();
+//          lon = pll.Lng();
+
+          proj.FromCartesianTGeodetic(pix.x(), pix.y(), pix.z(), lat, lon);
 
           Waypoint wp;
           wp.setFrame(MAV_FRAME_GLOBAL_RELATIVE_ALT);
